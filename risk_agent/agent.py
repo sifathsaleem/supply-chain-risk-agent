@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import datetime
 import json
@@ -10,7 +9,6 @@ from google.adk.agents.context import Context
 from google.adk.apps import App
 from google.adk.events.event import Event
 from google.adk.workflow import Workflow, node
-from google.cloud import bigquery
 from google.genai import types
 from pydantic import BaseModel, Field
 
@@ -20,10 +18,8 @@ from risk_agent.config import (
     ACTION_MEDIUM,
     ALERT_MODEL_NAME,
     ANALYZE_MODEL_NAME,
-    BIGQUERY_DATASET_NAME,
     HIGH_SEVERITY_EVENTS,
     MED_SEVERITY_EVENTS,
-    PROJECT_ID,
     SCORE_HIGH_SEVERITY,
     SCORE_MED_SEVERITY,
     SCORE_NEGATIVE,
@@ -31,6 +27,9 @@ from risk_agent.config import (
     THRESHOLD_LOW,
     THRESHOLD_MEDIUM,
 )
+
+# Import the MCP server instance
+from risk_agent.mcp_tools import mcp
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -46,84 +45,6 @@ class AnalysisResponseSchema(BaseModel):
     sentiment: Literal["NEGATIVE", "NEUTRAL", "POSITIVE"]
     confidence: float
     entities: EntitiesSchema
-
-# BigQuery Table Creator/Helper
-def init_bq_tables(client: bigquery.Client, dataset_id: str):
-    """Ensures BigQuery dataset and tables exist."""
-    dataset_ref = f"{client.project}.{dataset_id}"
-    try:
-        client.get_dataset(dataset_ref)
-    except Exception:
-        # Create dataset if missing
-        dataset = bigquery.Dataset(dataset_ref)
-        dataset.location = "US"
-        client.create_dataset(dataset, timeout=30)
-        logger.info(f"Created BigQuery dataset {dataset_id}")
-
-    # 1. supply_chain_events
-    events_ref = f"{client.project}.{dataset_id}.supply_chain_events"
-    try:
-        client.get_table(events_ref)
-    except Exception:
-        schema = [
-            bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
-            bigquery.SchemaField("supplier_name", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("country", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("category", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("source_url", "STRING", mode="NULLABLE"),
-            bigquery.SchemaField("raw_text", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("security_flag", "BOOLEAN", mode="REQUIRED"),
-        ]
-        table = bigquery.Table(events_ref, schema=schema)
-        client.create_table(table)
-        logger.info(f"Created BigQuery table {events_ref}")
-
-    # 2. supplier_risk_scores
-    scores_ref = f"{client.project}.{dataset_id}.supplier_risk_scores"
-    try:
-        client.get_table(scores_ref)
-    except Exception:
-        schema = [
-            bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
-            bigquery.SchemaField("supplier_name", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("risk_level", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("risk_score", "INTEGER", mode="REQUIRED"),
-            bigquery.SchemaField("sentiment", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("confidence", "FLOAT", mode="REQUIRED"),
-            bigquery.SchemaField("entities", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("recommended_action", "STRING", mode="REQUIRED"),
-        ]
-        table = bigquery.Table(scores_ref, schema=schema)
-        client.create_table(table)
-        logger.info(f"Created BigQuery table {scores_ref}")
-
-    # 3. manager_alerts
-    alerts_ref = f"{client.project}.{dataset_id}.manager_alerts"
-    try:
-        client.get_table(alerts_ref)
-    except Exception:
-        schema = [
-            bigquery.SchemaField("timestamp", "TIMESTAMP", mode="REQUIRED"),
-            bigquery.SchemaField("supplier_name", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("risk_level", "STRING", mode="REQUIRED"),
-            bigquery.SchemaField("alert_message", "STRING", mode="REQUIRED"),
-        ]
-        table = bigquery.Table(alerts_ref, schema=schema)
-        client.create_table(table)
-        logger.info(f"Created BigQuery table {alerts_ref}")
-
-async def insert_row_bq(client: bigquery.Client, table_ref: str, row: dict):
-    """Inserts a single row into BigQuery using load jobs to support Sandbox/Free Tier."""
-    try:
-        job_config = bigquery.LoadJobConfig(
-            write_disposition="WRITE_APPEND",
-            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON
-        )
-        job = client.load_table_from_json([row], table_ref, job_config=job_config)
-        await asyncio.to_thread(job.result)
-        logger.info(f"Successfully inserted row into {table_ref} via load job.")
-    except Exception as e:
-        logger.error(f"Failed to insert row to BigQuery table {table_ref}: {e}")
 
 def parse_pubsub_payload(node_input: Any) -> dict:
     """Parses a Pub/Sub message payload supporting base64 and plain JSON formats."""
@@ -183,18 +104,14 @@ def parse_pubsub_payload(node_input: Any) -> dict:
 
 @node
 async def security_node(ctx: Context, node_input: Any) -> Event:
-    """Stage 0: Checks for prompt injection and validates required fields in plain Python."""
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    init_bq_tables(bq_client, BIGQUERY_DATASET_NAME)
-
+    """Stage 0: Checks for prompt injection and validates required fields via MCP BigQuery tools."""
     # Try to parse the payload
     try:
         clean_event = parse_pubsub_payload(node_input)
     except Exception as e:
         error_msg = f"ERROR: missing required fields: [Invalid JSON format or could not parse payload: {e}]"
-        table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
         row = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.datetime.utcnow(),
             "supplier_name": "ERROR",
             "country": "ERROR",
             "category": "ERROR",
@@ -202,7 +119,7 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
             "raw_text": error_msg,
             "security_flag": False
         }
-        await insert_row_bq(bq_client, table_ref, row)
+        await mcp.call_tool("bigquery_write", {"table_name": "supply_chain_events", "row": row})
         return Event(output=error_msg, route="field_error")
 
     # CHECK 1: Prompt injection detection (case-insensitive)
@@ -234,10 +151,9 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
 
     if injection_detected:
         logger.warning(f"SECURITY EVENT: Prompt injection attempt detected for supplier: {supplier_name}")
-        # Log event with security_flag=True
-        events_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
+        # Log event with security_flag=True using MCP Tool
         event_row = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.datetime.utcnow(),
             "supplier_name": supplier_name,
             "country": country,
             "category": category,
@@ -245,18 +161,17 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
             "raw_text": raw_text,
             "security_flag": True
         }
-        await insert_row_bq(bq_client, events_ref, event_row)
+        await mcp.call_tool("bigquery_write", {"table_name": "supply_chain_events", "row": event_row})
 
-        # Log alert to manager_alerts
+        # Log alert to manager_alerts using MCP Tool
         alert_msg = "SECURITY EVENT: Prompt injection attempt detected in supplier data. Manual review required. Pipeline execution halted."
-        alerts_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.manager_alerts"
         alert_row = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.datetime.utcnow(),
             "supplier_name": supplier_name,
             "risk_level": "HIGH",
             "alert_message": alert_msg
         }
-        await insert_row_bq(bq_client, alerts_ref, alert_row)
+        await mcp.call_tool("bigquery_write", {"table_name": "manager_alerts", "row": alert_row})
 
         return Event(output=alert_msg, route="security_violation")
 
@@ -272,10 +187,9 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
         error_msg = f"ERROR: missing required fields: {missing_str}"
         logger.error(error_msg)
 
-        # Log error event with security_flag=False
-        events_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
+        # Log error event with security_flag=False using MCP Tool
         event_row = {
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.datetime.utcnow(),
             "supplier_name": supplier_name or "ERROR",
             "country": country or "ERROR",
             "category": category or "ERROR",
@@ -283,7 +197,7 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
             "raw_text": error_msg,
             "security_flag": False
         }
-        await insert_row_bq(bq_client, events_ref, event_row)
+        await mcp.call_tool("bigquery_write", {"table_name": "supply_chain_events", "row": event_row})
 
         return Event(output=error_msg, route="field_error")
 
@@ -293,16 +207,12 @@ async def security_node(ctx: Context, node_input: Any) -> Event:
 
 @node
 async def ingest_node(ctx: Context, node_input: dict) -> dict:
-    """Stage 1: Receives parsed payload from security_node and writes to supply_chain_events."""
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    init_bq_tables(bq_client, BIGQUERY_DATASET_NAME)
-
+    """Stage 1: Receives parsed payload from security_node and writes to supply_chain_events via MCP."""
     clean_event = node_input
     logger.info(f"Ingested event for supplier: {clean_event['supplier_name']}")
 
-    table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
     row = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.utcnow(),
         "supplier_name": clean_event["supplier_name"],
         "country": clean_event["country"],
         "category": clean_event["category"],
@@ -310,7 +220,7 @@ async def ingest_node(ctx: Context, node_input: dict) -> dict:
         "raw_text": clean_event["raw_text"],
         "security_flag": False
     }
-    await insert_row_bq(bq_client, table_ref, row)
+    await mcp.call_tool("bigquery_write", {"table_name": "supply_chain_events", "row": row})
 
     return clean_event
 
@@ -372,7 +282,7 @@ async def analyze_node(ctx: Context, node_input: dict) -> dict:
 
 @node
 async def risk_score_node(ctx: Context, node_input: dict) -> dict:
-    """Stage 3: Compute risk score using Python logic and log to BigQuery."""
+    """Stage 3: Compute risk score using Python logic and log to BigQuery via MCP."""
     sentiment = node_input.get("sentiment", "NEUTRAL")
     entities = node_input.get("entities", {"locations": [], "event_types": [], "industries": []})
     supplier_name = node_input.get("supplier_name", "Unknown Supplier")
@@ -406,20 +316,18 @@ async def risk_score_node(ctx: Context, node_input: dict) -> dict:
         risk_level = "HIGH"
         recommended_action = ACTION_HIGH
 
-    # Write to BigQuery table "supplier_risk_scores"
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supplier_risk_scores"
+    # Write to BigQuery table "supplier_risk_scores" via MCP
     row = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.utcnow(),
         "supplier_name": supplier_name,
         "risk_level": risk_level,
         "risk_score": score,
         "sentiment": sentiment,
         "confidence": confidence,
-        "entities": json.dumps(entities),
+        "entities": entities,
         "recommended_action": recommended_action
     }
-    await insert_row_bq(bq_client, table_ref, row)
+    await mcp.call_tool("bigquery_write", {"table_name": "supplier_risk_scores", "row": row})
 
     return {
         "supplier_name": supplier_name,
@@ -435,7 +343,7 @@ async def risk_score_node(ctx: Context, node_input: dict) -> dict:
 
 @node
 async def alert_node(ctx: Context, node_input: dict):
-    """Stage 4: Write alert message and write to manager_alerts table."""
+    """Stage 4: Write alert message and write to manager_alerts table via MCP."""
     risk_level = node_input.get("risk_level", "LOW")
     supplier_name = node_input.get("supplier_name", "Unknown Supplier")
     country = node_input.get("country", "Unknown Country")
@@ -467,16 +375,14 @@ Return only the 2 sentences, no labels or preamble."""
     else:
         alert_message = "No action required."
 
-    # Write alert to BigQuery
-    bq_client = bigquery.Client(project=PROJECT_ID)
-    table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.manager_alerts"
+    # Write alert to BigQuery via MCP
     row = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.utcnow(),
         "supplier_name": supplier_name,
         "risk_level": risk_level,
         "alert_message": alert_message
     }
-    await insert_row_bq(bq_client, table_ref, row)
+    await mcp.call_tool("bigquery_write", {"table_name": "manager_alerts", "row": row})
 
     # Yield content event for web UI rendering, then yield output for final node output
     yield Event(
@@ -498,7 +404,7 @@ root_agent = Workflow(
         (analyze_node, risk_score_node),
         (risk_score_node, alert_node)
     ],
-    description="A sequential supply chain risk intelligence pipeline using ADK 2.0 with security checks."
+    description="A sequential supply chain risk intelligence pipeline using ADK 2.0 with security checks and MCP BQ tools."
 )
 
 app = App(
