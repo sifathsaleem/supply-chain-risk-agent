@@ -13,7 +13,7 @@ BIGQUERY_DATASET_NAME = os.getenv("BIGQUERY_DATASET_NAME", "supply_chain")
 
 # Model configuration
 ANALYZE_MODEL_NAME = os.getenv("ANALYZE_MODEL_NAME", "gemini-3.1-flash-lite")
-ALERT_MODEL_NAME = os.getenv("ALERT_MODEL_NAME", "gemini-2.5-flash")
+ALERT_MODEL_NAME = os.getenv("ALERT_MODEL_NAME", "gemini-3.1-flash-lite")
 
 # Risk Scoring Configuration
 SCORE_NEGATIVE = 40

@@ -145,8 +145,8 @@ def parse_pubsub_payload(node_input: Any) -> dict:
             try:
                 decoded = base64.b64decode(raw_str).decode('utf-8')
                 payload_dict = json.loads(decoded)
-            except Exception as err:
-                raise ValueError(f"Could not parse payload as JSON. Content: {raw_str}") from err
+            except Exception as decode_err:
+                raise ValueError(f"Could not parse payload as JSON. Content: {raw_str}") from decode_err
 
     if isinstance(payload_dict, dict):
         msg = payload_dict.get("message")
@@ -182,12 +182,122 @@ def parse_pubsub_payload(node_input: Any) -> dict:
 # ----------------- WORKFLOW NODES -----------------
 
 @node
-async def ingest_node(ctx: Context, node_input: Any) -> dict:
-    """Stage 1: Receives Pub/Sub message, parses payload, writes to supply_chain_events."""
+async def security_node(ctx: Context, node_input: Any) -> Event:
+    """Stage 0: Checks for prompt injection and validates required fields in plain Python."""
     bq_client = bigquery.Client(project=PROJECT_ID)
     init_bq_tables(bq_client, BIGQUERY_DATASET_NAME)
 
-    clean_event = parse_pubsub_payload(node_input)
+    # Try to parse the payload
+    try:
+        clean_event = parse_pubsub_payload(node_input)
+    except Exception as e:
+        error_msg = f"ERROR: missing required fields: [Invalid JSON format or could not parse payload: {e}]"
+        table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
+        row = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "supplier_name": "ERROR",
+            "country": "ERROR",
+            "category": "ERROR",
+            "source_url": "",
+            "raw_text": error_msg,
+            "security_flag": False
+        }
+        await insert_row_bq(bq_client, table_ref, row)
+        return Event(output=error_msg, route="field_error")
+
+    # CHECK 1: Prompt injection detection (case-insensitive)
+    injection_patterns = [
+        "ignore previous instructions",
+        "ignore all rules",
+        "you are now",
+        "bypass all",
+        "auto-approve",
+        "output low for all",
+        "disregard",
+        "override"
+    ]
+
+    supplier_name = clean_event.get("supplier_name", "")
+    category = clean_event.get("category", "")
+    raw_text = clean_event.get("raw_text", "")
+    country = clean_event.get("country", "")
+    source_url = clean_event.get("source_url", "")
+
+    injection_detected = False
+    for field in [raw_text, supplier_name, category]:
+        if not isinstance(field, str):
+            field = str(field)
+        field_lower = field.lower()
+        if any(pattern in field_lower for pattern in injection_patterns):
+            injection_detected = True
+            break
+
+    if injection_detected:
+        logger.warning(f"SECURITY EVENT: Prompt injection attempt detected for supplier: {supplier_name}")
+        # Log event with security_flag=True
+        events_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
+        event_row = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "supplier_name": supplier_name,
+            "country": country,
+            "category": category,
+            "source_url": source_url,
+            "raw_text": raw_text,
+            "security_flag": True
+        }
+        await insert_row_bq(bq_client, events_ref, event_row)
+
+        # Log alert to manager_alerts
+        alert_msg = "SECURITY EVENT: Prompt injection attempt detected in supplier data. Manual review required. Pipeline execution halted."
+        alerts_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.manager_alerts"
+        alert_row = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "supplier_name": supplier_name,
+            "risk_level": "HIGH",
+            "alert_message": alert_msg
+        }
+        await insert_row_bq(bq_client, alerts_ref, alert_row)
+
+        return Event(output=alert_msg, route="security_violation")
+
+    # CHECK 2: Required field validation
+    missing_fields = []
+    for field_name in ["supplier_name", "country", "category", "raw_text"]:
+        val = clean_event.get(field_name)
+        if not val or not isinstance(val, str) or not val.strip():
+            missing_fields.append(field_name)
+
+    if missing_fields:
+        missing_str = ", ".join(missing_fields)
+        error_msg = f"ERROR: missing required fields: {missing_str}"
+        logger.error(error_msg)
+
+        # Log error event with security_flag=False
+        events_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
+        event_row = {
+            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "supplier_name": supplier_name or "ERROR",
+            "country": country or "ERROR",
+            "category": category or "ERROR",
+            "source_url": source_url,
+            "raw_text": error_msg,
+            "security_flag": False
+        }
+        await insert_row_bq(bq_client, events_ref, event_row)
+
+        return Event(output=error_msg, route="field_error")
+
+    # Both checks passed: proceed
+    return Event(output=clean_event, route="pass")
+
+
+@node
+async def ingest_node(ctx: Context, node_input: dict) -> dict:
+    """Stage 1: Receives parsed payload from security_node and writes to supply_chain_events."""
+    bq_client = bigquery.Client(project=PROJECT_ID)
+    init_bq_tables(bq_client, BIGQUERY_DATASET_NAME)
+
+    clean_event = node_input
     logger.info(f"Ingested event for supplier: {clean_event['supplier_name']}")
 
     table_ref = f"{bq_client.project}.{BIGQUERY_DATASET_NAME}.supply_chain_events"
@@ -382,12 +492,13 @@ Return only the 2 sentences, no labels or preamble."""
 root_agent = Workflow(
     name="risk_workflow",
     edges=[
-        ('START', ingest_node),
+        ('START', security_node),
+        (security_node, {"pass": ingest_node}),
         (ingest_node, analyze_node),
         (analyze_node, risk_score_node),
         (risk_score_node, alert_node)
     ],
-    description="A sequential supply chain risk intelligence pipeline using ADK 2.0."
+    description="A sequential supply chain risk intelligence pipeline using ADK 2.0 with security checks."
 )
 
 app = App(
