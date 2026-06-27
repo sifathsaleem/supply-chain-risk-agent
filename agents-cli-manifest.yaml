@@ -1,6 +1,6 @@
 name: supply-chain-risk-agent
 acli_version: 0.5.1
-agent_directory: app
+agent_directory: risk_agent
 region: us-east1
 base_template: adk
 generated_at: '2026-06-25T18:19:45.597159+00:00'

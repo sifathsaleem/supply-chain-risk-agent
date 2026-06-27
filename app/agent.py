@@ -1,15 +1,13 @@
-import datetime
-from zoneinfo import ZoneInfo
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.context import Context
 from google.adk.apps import App
+from google.adk.events.event import Event
+from google.adk.events.request_input import RequestInput
 from google.adk.models import Gemini
 from google.adk.workflow import Workflow, node
-from google.adk.agents.context import Context
-from google.adk.events.request_input import RequestInput
-from google.adk.events.event import Event
 from pydantic import BaseModel
-import os
+
 
 class AnalysisOutput(BaseModel):
     summary: str
@@ -34,14 +32,14 @@ async def human_review(ctx: Context, node_input: dict):
     if not ctx.resume_inputs:
         summary = node_input.get("summary", "No summary")
         risk_level = node_input.get("risk_level", "Unknown")
-        
+
         # Yield RequestInput to pause and ask for human confirmation
         yield RequestInput(
-            interrupt_id="ask_approval", 
+            interrupt_id="ask_approval",
             message=f"Risk Level identified as {risk_level}.\nSummary: {summary}\nDo you approve this analysis? (Yes/No)"
         )
         return
-    
+
     # Resume after human provides input
     approval = ctx.resume_inputs["ask_approval"]
     final_output = {
@@ -49,7 +47,7 @@ async def human_review(ctx: Context, node_input: dict):
         "human_approval": approval,
         "status": "Approved" if "yes" in approval.lower() else "Rejected"
     }
-    
+
     # Emits Event to output the final result
     yield Event(output=final_output)
 
