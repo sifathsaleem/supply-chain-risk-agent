@@ -171,9 +171,9 @@ def parse_pubsub_payload(node_input: Any) -> dict:
         raise ValueError("Payload is not a valid JSON object/dictionary")
 
     return {
-        "supplier_name": payload_dict.get("supplier_name", "Unknown Supplier"),
-        "country": payload_dict.get("country", "Unknown Country"),
-        "category": payload_dict.get("category", "Unknown Category"),
+        "supplier_name": payload_dict.get("supplier_name", ""),
+        "country": payload_dict.get("country", ""),
+        "category": payload_dict.get("category", ""),
         "source_url": payload_dict.get("source_url", ""),
         "raw_text": payload_dict.get("raw_text", ""),
         "published_date": payload_dict.get("published_date", "")
