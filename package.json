@@ -1,0 +1,15 @@
+{
+  "name": "supply-chain-risk-agent",
+  "version": "1.0.0",
+  "description": "Simple ReAct agent Agent generated with `agents-cli` version `0.5.1`",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

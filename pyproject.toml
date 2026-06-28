@@ -9,7 +9,7 @@ authors = [
 
 
 dependencies = [
-    "google-adk>=2.0.0a0",
+    "google-adk[gcp]>=2.0.0a0",
     "google-cloud-bigquery",
     "google-cloud-pubsub",
     "fastapi",

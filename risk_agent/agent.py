@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import datetime
 import json
@@ -87,6 +88,8 @@ def parse_pubsub_payload(node_input: Any) -> dict:
                     payload_dict = json.loads(data)
                 except Exception:
                     pass
+        elif isinstance(data, dict):
+            payload_dict = data
 
     if not isinstance(payload_dict, dict):
         raise ValueError("Payload is not a valid JSON object/dictionary")
@@ -246,7 +249,8 @@ async def analyze_node(ctx: Context, node_input: dict) -> dict:
     client = genai.Client()
 
     try:
-        response = await client.aio.models.generate_content(
+        response = await asyncio.to_thread(
+            client.models.generate_content,
             model=ANALYZE_MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -363,7 +367,8 @@ Events detected: {event_types}. Sentiment: {sentiment}.
 Return only the 2 sentences, no labels or preamble."""
 
         try:
-            response = await client.aio.models.generate_content(
+            response = await asyncio.to_thread(
+                client.models.generate_content,
                 model=ALERT_MODEL_NAME,
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.2)
