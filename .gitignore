@@ -220,6 +220,8 @@ clear_bigquery.py
 # Unwanted development files
 AGENTS.md
 kaggle_writeup.docx
+kaggle_writeup.md
+kaggle_thumbnail.png
 components.json
 jsconfig.json
 .google-agents-cli/
@@ -227,6 +229,7 @@ jsconfig.json
 .persist_vector_store/
 skills-lock.json
 artifacts/
+
 
 
 
