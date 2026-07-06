@@ -202,3 +202,31 @@ my_env.tfvars
 
 # A2A Inspector
 tools/a2a-inspector/
+
+# Credentials — never commit these
+credentials.json
+*.json.key
+service-account*.json
+
+# Environment files
+.env
+.env.local
+
+# Build artifacts
+risk_dashboard/frontend/dist/
+dist/
+clear_bigquery.py
+
+# Unwanted development files
+AGENTS.md
+kaggle_writeup.docx
+components.json
+jsconfig.json
+.google-agents-cli/
+.saved_chats/
+.persist_vector_store/
+skills-lock.json
+artifacts/
+
+
+

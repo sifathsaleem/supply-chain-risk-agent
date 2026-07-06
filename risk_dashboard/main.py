@@ -22,7 +22,7 @@ logger = logging.getLogger("risk_dashboard")
 PROJECT_ID      = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID", "ringed-tuner-499715-h9")
 DATASET_ID      = os.getenv("BIGQUERY_DATASET") or os.getenv("BIGQUERY_DATASET_NAME", "supply_chain")
 PUBSUB_TOPIC    = os.getenv("PUBSUB_TOPIC_NAME", "supply-chain-news")
-NEWS_FETCHER_URL = os.getenv("NEWS_FETCHER_URL", "http://localhost:8081")
+NEWS_FETCHER_URL = os.getenv("NEWS_FETCHER_URL", "http://127.0.0.1:8001")
 
 # ─── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(title="Supply Chain Risk Dashboard", version="1.0.0")
@@ -102,6 +102,7 @@ class SupplierRow(BaseModel):
     supplier_name: str
     country: str
     category: str
+    added_date: str | None = None
 
 class BulkSupplierBody(BaseModel):
     suppliers: list[SupplierRow]
@@ -135,7 +136,7 @@ def add_suppliers(body: BulkSupplierBody):
             "supplier_name": s.supplier_name.strip(),
             "country":       s.country.strip(),
             "category":      s.category.strip(),
-            "added_date":    date.today().isoformat(),
+            "added_date":    s.added_date or date.today().isoformat(),
         })
         existing.add(s.supplier_name)
         added += 1
@@ -158,18 +159,58 @@ def add_suppliers(body: BulkSupplierBody):
 @app.delete("/api/suppliers/{supplier_name}")
 def delete_supplier(supplier_name: str):
     client = bq_client()
+    # BigQuery free sandbox blocks DML (DELETE/UPDATE/INSERT).
+    # Workaround: recreate the table via DDL (CREATE OR REPLACE TABLE … AS SELECT)
+    # which IS permitted on the free tier.
     sql = f"""
-        DELETE FROM {tbl('suppliers')}
-        WHERE supplier_name = @name
+        CREATE OR REPLACE TABLE {tbl('suppliers')} AS
+        SELECT supplier_name, country, category, added_date
+        FROM {tbl('suppliers')}
+        WHERE supplier_name != @name
     """
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("name", "STRING", supplier_name)]
     )
     try:
         client.query(sql, job_config=job_config).result()
+
+        # Recreate supplier_risk_scores without the deleted supplier (if table exists)
+        try:
+            sql_scores = f"""
+                CREATE OR REPLACE TABLE {tbl('supplier_risk_scores')} AS
+                SELECT * FROM {tbl('supplier_risk_scores')}
+                WHERE supplier_name != @name
+            """
+            client.query(sql_scores, job_config=job_config).result()
+        except Exception as e:
+            logger.warning(f"Did not clean up supplier_risk_scores (may not exist yet): {e}")
+
+        # Recreate manager_alerts without the deleted supplier (if table exists)
+        try:
+            sql_alerts = f"""
+                CREATE OR REPLACE TABLE {tbl('manager_alerts')} AS
+                SELECT * FROM {tbl('manager_alerts')}
+                WHERE supplier_name != @name
+            """
+            client.query(sql_alerts, job_config=job_config).result()
+        except Exception as e:
+            logger.warning(f"Did not clean up manager_alerts (may not exist yet): {e}")
+
+        # Recreate supply_chain_events without the deleted supplier (if table exists)
+        try:
+            sql_events = f"""
+                CREATE OR REPLACE TABLE {tbl('supply_chain_events')} AS
+                SELECT * FROM {tbl('supply_chain_events')}
+                WHERE supplier_name != @name
+            """
+            client.query(sql_events, job_config=job_config).result()
+        except Exception as e:
+            logger.warning(f"Did not clean up supply_chain_events (may not exist yet): {e}")
+
         return {"deleted": True, "supplier_name": supplier_name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/api/suppliers/upload-csv")
@@ -213,11 +254,12 @@ async def upload_csv(file: UploadFile = File(...)):
             skipped_dup += 1
             continue
 
+        ad = row.get("added_date", "").strip()
         rows_to_insert.append({
             "supplier_name": sn,
             "country":       cn,
             "category":      ca,
-            "added_date":    date.today().isoformat(),
+            "added_date":    ad or date.today().isoformat(),
         })
         existing.add(sn)
         added += 1
@@ -242,8 +284,11 @@ async def upload_csv(file: UploadFile = File(...)):
     }
 
 
+class TriggerScanBody(BaseModel):
+    supplier_names: list[str] = None
+
 @app.post("/api/suppliers/trigger-scan")
-async def trigger_scan():
+async def trigger_scan(body: TriggerScanBody = None):
     client = bq_client()
     try:
         count_result = list(client.query(f"SELECT COUNT(*) as cnt FROM {tbl('suppliers')}").result())
@@ -251,9 +296,13 @@ async def trigger_scan():
     except Exception:
         supplier_count = 0
 
+    payload = {}
+    if body and body.supplier_names:
+        payload["supplier_names"] = body.supplier_names
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            await http.post(f"{NEWS_FETCHER_URL}/run")
+            await http.post(f"{NEWS_FETCHER_URL}/run", json=payload)
     except Exception as e:
         logger.warning(f"News fetcher call failed: {e}")
 
@@ -269,15 +318,14 @@ def get_risk_scores():
     client = bq_client()
     sql = f"""
         SELECT
-            r.supplier_name, s.country, s.category, r.risk_level, r.risk_score,
-            r.sentiment, r.entities, r.recommended_action,
-            MAX(r.timestamp) as last_updated
+          r.supplier_name, s.country, r.risk_level, r.risk_score, r.sentiment,
+          r.confidence, r.entities, r.summary, r.recommended_action,
+          MAX(r.timestamp) as last_updated
         FROM {tbl('supplier_risk_scores')} r
-        LEFT JOIN {tbl('suppliers')} s ON r.supplier_name = s.supplier_name
-        GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
-        ORDER BY
-            CASE r.risk_level WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END,
-            last_updated DESC
+        INNER JOIN {tbl('suppliers')} s ON r.supplier_name = s.supplier_name
+        GROUP BY r.supplier_name, s.country, r.risk_level, r.risk_score, r.sentiment,
+          r.confidence, r.entities, r.summary, r.recommended_action
+        ORDER BY last_updated DESC
     """
     try:
         rows = [serialize(dict(r)) for r in client.query(sql).result()]
@@ -291,9 +339,11 @@ def get_risk_scores():
 def get_alerts():
     client = bq_client()
     sql = f"""
-        SELECT supplier_name, risk_level, alert_message, timestamp
-        FROM {tbl('manager_alerts')}
-        ORDER BY timestamp DESC
+        SELECT a.supplier_name, a.risk_level, a.alert_message, a.timestamp
+        FROM {tbl('manager_alerts')} a
+        INNER JOIN {tbl('suppliers')} s ON a.supplier_name = s.supplier_name
+        WHERE a.timestamp > DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 24 HOUR)
+        ORDER BY a.timestamp DESC
         LIMIT 10
     """
     try:
@@ -308,12 +358,11 @@ def get_alerts():
 def get_events():
     client = bq_client()
     sql = f"""
-        SELECT
-            supplier_name, country, timestamp,
-            LEFT(raw_text, 120) as raw_text_preview,
-            security_flag
-        FROM {tbl('supply_chain_events')}
-        ORDER BY timestamp DESC
+        SELECT e.supplier_name, e.country, e.timestamp, e.article_count,
+          LEFT(e.raw_texts, 1000) as raw_text_preview, e.security_flag
+        FROM {tbl('supply_chain_events')} e
+        INNER JOIN {tbl('suppliers')} s ON e.supplier_name = s.supplier_name
+        ORDER BY e.timestamp DESC
         LIMIT 20
     """
     try:
@@ -330,14 +379,20 @@ def simulate_event():
         "supplier_name": "Delta Semiconductors",
         "country": "Taiwan",
         "category": "Electronics",
-        "source_url": "https://demo.example.com/taiwan-earthquake",
-        "raw_text": (
-            "A magnitude 7.4 earthquake struck Taiwan's eastern coast, causing significant"
-            " structural damage to Delta Semiconductors' main fabrication facility. Operations"
-            " have been halted indefinitely and chip output is expected to drop by 60% for the"
-            " next 6 to 8 weeks as engineers assess the damage."
-        ),
-        "published_date": date.today().isoformat(),
+        "articles": [
+            {
+                "source_url": "https://demo.example.com/taiwan-earthquake",
+                "raw_text": (
+                    "A magnitude 7.4 earthquake struck Taiwan's eastern coast, causing significant"
+                    " structural damage to Delta Semiconductors' main fabrication facility. Operations"
+                    " have been halted indefinitely and chip output is expected to drop by 60% for the"
+                    " next 6 to 8 weeks as engineers assess the damage."
+                ),
+                "published_date": date.today().isoformat()
+            }
+        ],
+        "article_count": 1,
+        "fetched_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
     }
     try:
         publisher = pubsub_v1.PublisherClient()
@@ -366,6 +421,16 @@ if os.path.exists(frontend_dist):
         StaticFiles(directory=os.path.join(frontend_dist, "assets")),
         name="assets"
     )
+    @app.get("/favicon.ico")
+    async def serve_favicon():
+        logo_path = os.path.join(frontend_dist, "logo.svg")
+        if os.path.exists(logo_path):
+            return FileResponse(logo_path, media_type="image/svg+xml")
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
     @app.get("/{full_path:path}")
     async def serve_react(full_path: str):
+        file_path = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
         return FileResponse(os.path.join(frontend_dist, "index.html"))

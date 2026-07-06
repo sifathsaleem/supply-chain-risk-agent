@@ -1,13 +1,16 @@
-.PHONY: install playground test run
+.PHONY: dev install build
 
 install:
-	uv sync
+	cd risk_dashboard && uv sync
+	cd risk_dashboard/frontend && npm install
+	cd news_fetcher && uv sync
+	cd risk_agent && uv sync
 
-playground:
-	uv run agents-cli playground --port 8080
+build:
+	cd risk_dashboard/frontend && npm run build
 
-test:
-	uv run pytest tests/test_scoring.py
-
-run:
-	uv run uvicorn app.fast_api_app:app --host 0.0.0.0 --port 8080
+dev: build
+	uvicorn risk_dashboard.main:app --reload --port 8002 & \
+	uvicorn news_fetcher.main:app --reload --port 8001 & \
+	uvicorn risk_agent.main:app --reload --port 8003 & \
+	uv run python forward_pubsub.py

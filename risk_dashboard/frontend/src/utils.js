@@ -1,5 +1,20 @@
 export function timeAgo(dateString) {
   if (!dateString) return 'unknown';
+
+  // Date-only string from DB (length 10: YYYY-MM-DD)
+  if (dateString.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+    const localToday = new Date().toLocaleDateString('en-CA');
+    if (dateString === localToday) {
+      return 'today';
+    }
+    const dateVal = new Date(dateString + 'T00:00:00');
+    const todayVal = new Date(localToday + 'T00:00:00');
+    const diffDays = Math.round((todayVal - dateVal) / 86400000);
+    if (diffDays === 1) return 'yesterday';
+    if (diffDays > 1) return `${diffDays} days ago`;
+    return 'today';
+  }
+
   const date = new Date(dateString.endsWith('Z') || dateString.includes('+') ? dateString : dateString + 'Z');
   const now = new Date();
   const seconds = Math.floor((now - date) / 1000);

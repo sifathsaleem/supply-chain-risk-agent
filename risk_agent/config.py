@@ -29,6 +29,6 @@ THRESHOLD_LOW = 30
 THRESHOLD_MEDIUM = 60
 
 # Recommended Action Templates
-ACTION_HIGH = "Immediately activate backup supplier and increase safety stock by 30 days."
-ACTION_MEDIUM = "Monitor closely and prepare contingency plan with backup supplier."
-ACTION_LOW = "Continue standard monitoring. No immediate action required."
+ACTION_HIGH = "Activate backup supplier now"
+ACTION_MEDIUM = "Prepare contingency plan"
+ACTION_LOW = "Continue monitoring"

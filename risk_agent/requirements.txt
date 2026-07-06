@@ -1,0 +1,10 @@
+google-adk[gcp]>=2.0.0a0
+google-cloud-bigquery
+google-cloud-pubsub
+fastapi
+uvicorn
+python-dotenv
+google-genai
+pydantic
+google-cloud-logging
+mcp

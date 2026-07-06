@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 
 # Load local environment variables from .env
-load_dotenv()
+load_dotenv(override=True)
 
 # Google Cloud Platform configuration
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID", "ringed-tuner-499715-h9")

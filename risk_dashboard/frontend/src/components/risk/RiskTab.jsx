@@ -5,7 +5,13 @@ import AlertFeed from './AlertFeed';
 import EventStream from './EventStream';
 import { useToast } from '../../context/ToastContext';
 
-export default function RiskTab({ riskScoresState, alertsState, eventsState }) {
+const C = {
+  bg:      '#0e0e0e',
+  sc:      '#232222',
+  outline: '#2d2c2c',
+};
+
+export default function RiskTab({ riskScoresState, alertsState, eventsState, refreshInterval }) {
   const { showToast } = useToast();
   const { data: riskScores, loading: scoresLoading, lastFetched, refetch: refetchScores } = riskScoresState;
   const { data: alerts, loading: alertsLoading, refetch: refetchAlerts } = alertsState;
@@ -13,68 +19,83 @@ export default function RiskTab({ riskScoresState, alertsState, eventsState }) {
 
   const handleSimulate = async () => {
     try {
-      const res = await fetch('/api/simulate', { method: 'POST' });
+      const res = await fetch('/api/simulate', { method:'POST' });
       const data = await res.json();
       if (data.warning) {
-        showToast('Simulation posted with warning: ' + data.warning, 'info');
+        showToast('Simulation Triggered', 'Posted with warning: ' + data.warning, 'warning');
       } else {
-        showToast('⚡ Simulated HIGH risk event published to Pub/Sub!', 'info');
+        showToast('simulated', '⚡ High risk event published to Pub/Sub!');
       }
-      // Trigger a quick reload of scoreboard & alerts after publishing simulation
-      setTimeout(async () => {
-        await refetchScores();
-        await refetchAlerts();
-        await refetchEvents();
-      }, 1500);
-    } catch (err) {
-      showToast('Simulation trigger failed: ' + err.message, 'error');
-    }
+      setTimeout(async () => { await refetchScores(); await refetchAlerts(); await refetchEvents(); }, 1500);
+    } catch(e) { showToast('Simulation Failed', e.message, 'error'); }
+  };
+
+  const panel = {
+    background: C.sc,
+    border: `1px solid ${C.outline}`,
+    borderRadius: 12,
+    display: 'flex', flexDirection: 'column',
+    overflow: 'hidden',
+    maxHeight: 'calc(100vh - 340px)',
+    minHeight: 500,
+  };
+  const panelHead = {
+    padding:'14px 16px',
+    borderBottom:`1px solid ${C.outline}`,
+    background:'rgba(45,44,44,0.4)',
+    display:'flex', alignItems:'center', justifyContent:'space-between',
+    flexShrink:0,
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-56px)]">
-      <TopBar
-        riskScores={riskScores}
-        onSimulate={handleSimulate}
-        lastFetched={lastFetched}
-      />
-      
-      <div className="flex-1 overflow-hidden grid grid-cols-1 md:grid-cols-3 gap-4 p-4 min-h-0">
-        {/* Panel 1: Live Risk Scoreboard */}
-        <div className="card flex flex-col min-h-0 overflow-hidden">
-          <div className="px-4 py-3 border-b border-[var(--border-card)] flex justify-between items-center shrink-0">
-            <h2 className="text-xs font-semibold text-text-primary tracking-wide">⚡ Live Risk Scoreboard</h2>
-            {riskScores.length > 0 && (
-              <span className="text-[10px] text-text-muted">{riskScores.length} monitored</span>
-            )}
+    <div style={{
+      width:'100%', maxWidth:1600, margin:'0 auto',
+      padding:'32px 24px 56px',
+      display:'flex', flexDirection:'column', gap:24,
+      background:'#0e0e0e', minHeight:'100vh',
+    }}>
+      <TopBar riskScores={riskScores} onSimulate={handleSimulate} lastFetched={lastFetched} refreshInterval={refreshInterval} />
+
+      {/* Three-column panels */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:20}}>
+
+        {/* Panel 1: Supplier Risk Status */}
+        <div style={panel}>
+          <div style={panelHead}>
+            <h2 style={{fontSize:14,fontWeight:600,color:'#fff'}}>Supplier Risk Status</h2>
           </div>
-          <div className="flex-1 overflow-y-auto scrollable p-3">
+          <div style={{flex:1,overflowY:'auto',padding:16,display:'flex',flexDirection:'column',gap:12}}>
             <RiskScoreboard data={riskScores} loading={scoresLoading} />
           </div>
         </div>
 
         {/* Panel 2: Manager Alerts */}
-        <div className="card flex flex-col min-h-0 overflow-hidden">
-          <div className="px-4 py-3 border-b border-[var(--border-card)] flex justify-between items-center shrink-0">
-            <h2 className="text-xs font-semibold text-text-primary tracking-wide">🔔 Manager Alerts</h2>
-            {alerts.length > 0 && (
-              <span className="text-[10px] text-text-muted">Latest {alerts.length}</span>
+        <div style={panel}>
+          <div style={panelHead}>
+            <h2 style={{fontSize:14,fontWeight:600,color:'#fff'}}>Manager Alerts</h2>
+            {!alertsLoading && alerts.length>0 && (
+              <span style={{
+                fontSize:9,fontWeight:700,textTransform:'uppercase',letterSpacing:'0.05em',
+                padding:'3px 8px',borderRadius:999,
+                background:'#ef4444',color:'#000',
+              }}>{alerts.length} New</span>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto scrollable p-3">
+          <div style={{flex:1,overflowY:'auto',padding:16}}>
             <AlertFeed data={alerts} loading={alertsLoading} />
           </div>
         </div>
 
         {/* Panel 3: Live Event Stream */}
-        <div className="card flex flex-col min-h-0 overflow-hidden">
-          <div className="px-4 py-3 border-b border-[var(--border-card)] flex justify-between items-center shrink-0">
-            <h2 className="text-xs font-semibold text-text-primary tracking-wide">📡 Live Event Stream</h2>
-            {events.length > 0 && (
-              <span className="text-[10px] text-text-muted">Last {events.length}</span>
-            )}
+        <div style={panel}>
+          <div style={panelHead}>
+            <h2 style={{fontSize:14,fontWeight:600,color:'#fff'}}>Live Event Stream</h2>
+            <div style={{display:'flex',alignItems:'center',gap:6}}>
+              <span style={{width:6,height:6,borderRadius:'50%',background:'#ef4444',animation:'ping 1s cubic-bezier(0,0,.2,1) infinite'}} className="ping" />
+              <span style={{fontSize:10,fontWeight:700,letterSpacing:'0.08em',color:'#fff'}}>LIVE</span>
+            </div>
           </div>
-          <div className="flex-1 overflow-y-auto scrollable p-0">
+          <div style={{flex:1,overflowY:'auto'}}>
             <EventStream data={events} loading={eventsLoading} />
           </div>
         </div>

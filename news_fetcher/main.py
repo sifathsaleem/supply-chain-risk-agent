@@ -3,15 +3,17 @@ import datetime
 import json
 import logging
 import os
+import httpx
 from contextlib import asynccontextmanager
 
 from dateutil import parser as date_parser
 from dotenv import load_dotenv
 
 # Load .env variables
-load_dotenv()
+load_dotenv(override=True)
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from pydantic import BaseModel
 from google.adk.tools.mcp_tool import McpToolset
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from google.api_core.exceptions import NotFound
@@ -107,16 +109,9 @@ def init_bq_tables(client: bigquery.Client, dataset_id: str):
                 needs_population = True
 
         if needs_population:
-            logger.info(f"Populating BigQuery table {suppliers_ref} with mock supplier data")
-            job_config = bigquery.LoadJobConfig(
-                write_disposition="WRITE_APPEND",
-                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON
-            )
-            job = client.load_table_from_json(MOCK_SUPPLIERS, suppliers_ref, job_config=job_config)
-            job.result() # Wait for job to complete
-            logger.info("Successfully populated mock suppliers into BigQuery.")
+            logger.info(f"Populating BigQuery table {suppliers_ref} with mock supplier data is disabled to allow custom CSV upload testing.")
     except Exception as e:
-        logger.error(f"Failed to populate mock suppliers in BigQuery: {e}")
+        logger.error(f"Failed to check mock suppliers population: {e}")
 
     # Ensure processed_urls table exists
     processed_urls_ref = f"{client.project}.{dataset_id}.{BIGQUERY_PROCESSED_URLS_TABLE}"
@@ -362,7 +357,7 @@ async def log_fetch_results(client: bigquery.Client, dataset_id: str, name: str,
     """Appends execution statistics via load jobs (supporting Sandbox/Free Tier)."""
     table_ref = f"{client.project}.{dataset_id}.{BIGQUERY_FETCH_LOG_TABLE}"
     row = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "supplier_name": name,
         "articles_found": found,
         "articles_published": published,
@@ -380,7 +375,7 @@ async def log_fetch_results(client: bigquery.Client, dataset_id: str, name: str,
         logger.error(f"Failed to log fetch results via load job: {e}")
 
 
-async def perform_fetch() -> dict:
+async def perform_fetch(supplier_names: list[str] = None) -> dict:
     """Executes one full fetch cycle across all suppliers."""
     logger.info("Starting news fetch cycle...")
 
@@ -402,6 +397,8 @@ async def perform_fetch() -> dict:
 
     # Load supplier list
     suppliers = await load_suppliers(bq_client, BIGQUERY_DATASET_NAME)
+    if supplier_names is not None:
+        suppliers = [s for s in suppliers if s["supplier_name"] in supplier_names]
 
     summary = {
         "suppliers_scanned": 0,
@@ -432,36 +429,33 @@ async def perform_fetch() -> dict:
 
         found_articles = []
         source_used = ""
-
-        # Use Brave Search
-        try:
-            raw_res = await call_mcp_tool(
-                brave_toolset,
-                tool_name_choices=["brave_web_search", "web_search"],
-                arg_name_choices=["query", "keyword"],
-                query=query,
-                limit=5
-            )
-            if len(raw_res) >= 1:
-                found_articles = raw_res
-                source_used = "brave-search"
-        except Exception as e:
-            logger.error(f"Brave Search MCP failed for '{name}': {e}")
-
-        # Log which source was used
-        if source_used:
-            logger.info(f"Source: {source_used}")
+        if BRAVE_API_KEY:
+            try:
+                headers = {
+                    "Accept": "application/json",
+                    "X-Subscription-Token": BRAVE_API_KEY
+                }
+                params = {
+                    "q": query,
+                    "count": 5
+                }
+                async with httpx.AsyncClient() as http_client:
+                    resp = await http_client.get(
+                        "https://api.search.brave.com/res/v1/news/search",
+                        headers=headers,
+                        params=params,
+                        timeout=15.0
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        found_articles = data.get("results", [])
+                        source_used = "brave-news-api"
+                    else:
+                        logger.warning(f"Brave News API returned status code {resp.status_code}: {resp.text}")
+            except Exception as e:
+                logger.error(f"Brave News API request failed for '{name}': {e}")
         else:
-            logger.info("Source: none (no results or errors on Brave Search)")
-            # Fall back to a mock article for testing Pub/Sub and BigQuery logging
-            logger.info(f"Using mock news article fallback for supplier '{name}' to test the Pub/Sub and BigQuery pipeline")
-            found_articles = [{
-                "url": f"https://www.news-disruption-test.com/{name.lower().replace(' ', '-')}-delay-2026-{int(datetime.datetime.utcnow().timestamp())}",
-                "title": f"Supply Chain Disruption Alert: {name} facing delays",
-                "snippet": f"Reports indicate that {name} in {country} is experiencing severe logistics disruptions affecting {category} shipments.",
-                "date": datetime.date.today().isoformat()
-            }]
-            source_used = "mock-fallback"
+            logger.warning(f"BRAVE_API_KEY not configured. Cannot perform real news search for '{name}'.")
 
         first_5_articles = found_articles[:5]
         normalized_articles = [normalize_article(art) for art in first_5_articles]
@@ -474,6 +468,7 @@ async def perform_fetch() -> dict:
         published_count = 0
         skipped_count = 0
         new_urls_to_insert = []
+        articles_list = []
 
         for art in normalized_articles:
             url = art["url"]
@@ -492,28 +487,37 @@ async def perform_fetch() -> dict:
                 logger.info(f"Skipping article older than 7 days (published {pub_date}): {url}")
                 continue
 
-            # Construct message
+            articles_list.append({
+                "source_url": url,
+                "raw_text": f"{art['title']}. {art['snippet']}",
+                "published_date": pub_date.strftime("%Y-%m-%d")
+            })
+            new_urls_to_insert.append(url)
+
+        if articles_list:
             message_data = {
                 "supplier_name": name,
                 "country": country,
                 "category": category,
-                "source_url": url,
-                "raw_text": f"{art['title']}. {art['snippet']}",
-                "published_date": pub_date.strftime("%Y-%m-%d")
+                "articles": articles_list,
+                "article_count": len(articles_list),
+                "fetched_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
             }
 
             try:
                 message_bytes = json.dumps(message_data).encode("utf-8")
                 future = publisher.publish(topic_path, message_bytes)
                 await asyncio.to_thread(future.result)
-                logger.info(f"Published article to Pub/Sub: {url}")
+                logger.info(f"Published 1 message containing {len(articles_list)} articles for supplier '{name}' to Pub/Sub")
 
-                published_count += 1
+                published_count = 1  # count of suppliers published
                 total_articles_published_today += 1
-                new_urls_to_insert.append(url)
             except Exception as e:
-                logger.error(f"Failed to publish article {url}: {e}")
-                skipped_count += 1
+                logger.error(f"Failed to publish message for supplier {name}: {e}")
+                published_count = 0
+        else:
+            published_count = 0
+            logger.info(f"No new articles to publish for supplier '{name}'")
 
         if new_urls_to_insert:
             await insert_processed_urls(bq_client, BIGQUERY_DATASET_NAME, new_urls_to_insert)
@@ -534,24 +538,9 @@ async def perform_fetch() -> dict:
 
     logger.info(f"News fetch cycle completed. Summary: {summary}")
     return summary
-
-
 async def run_scheduler():
     """Loops and executes fetch cycle every SCHEDULE_INTERVAL_MINUTES."""
-    # Delay startup fetch slightly to let app initialize fully
-    await asyncio.sleep(5)
-
-    # Startup fetch
-    try:
-        async with fetch_lock:
-            state["status"] = "running"
-            await perform_fetch()
-            state["last_run_time"] = datetime.datetime.utcnow().isoformat() + "Z"
-            state["status"] = "idle"
-    except Exception as e:
-        logger.error(f"Error on startup fetch: {e}")
-        state["status"] = "idle"
-
+    logger.info("Scheduler started. Startup fetch is bypassed for clean custom CSV testing.")
     while True:
         await asyncio.sleep(SCHEDULE_INTERVAL_MINUTES * 60)
         try:
@@ -615,22 +604,24 @@ def get_health():
     }
 
 
+class RunBody(BaseModel):
+    supplier_names: list[str] = None
+
+
 @app.post("/run")
-async def manual_run(background_tasks: BackgroundTasks):
+async def manual_run(background_tasks: BackgroundTasks, body: RunBody = None):
     """Manually triggers a full news fetch cycle."""
-    if fetch_lock.locked():
-        raise HTTPException(status_code=409, detail="A news fetch cycle is already in progress.")
+    supplier_names = body.supplier_names if body else None
 
     async def run_in_background():
-        async with fetch_lock:
-            state["status"] = "running"
-            try:
-                await perform_fetch()
-                state["last_run_time"] = datetime.datetime.utcnow().isoformat() + "Z"
-            except Exception as e:
-                logger.error(f"Error during manual background run: {e}")
-            finally:
-                state["status"] = "idle"
+        state["status"] = "running"
+        try:
+            await perform_fetch(supplier_names)
+            state["last_run_time"] = datetime.datetime.utcnow().isoformat() + "Z"
+        except Exception as e:
+            logger.error(f"Error during manual background run: {e}")
+        finally:
+            state["status"] = "idle"
 
     background_tasks.add_task(run_in_background)
     return {
