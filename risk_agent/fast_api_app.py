@@ -32,7 +32,7 @@ app: FastAPI = get_fast_api_app(
     artifact_service_uri=artifact_service_uri,
     allow_origins=allow_origins,
     session_service_uri=session_service_uri,
-    otel_to_cloud=True,
+    otel_to_cloud=False,
     trigger_sources=["pubsub"], # Enables the Pub/Sub push trigger endpoint
 )
 app.title = "supply-chain-risk-agent"
