@@ -172,23 +172,25 @@ export default function EventStream({ data = [], loading }) {
                     </div>
 
                     {/* Fix 7: Article Count (Line 1.5) */}
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                      fontSize: '11px',
-                      color: 'var(--text-muted)',
-                      marginTop: '2px',
-                      marginBottom: '6px',
-                      paddingLeft: 16
-                    }}>
-                      <FileText size={10} />
-                      <span>
-                        {ev.article_count || 1} article
-                        {(ev.article_count || 1) !== 1 ? 's' : ''} analyzed
-                      </span>
-                    </div>
-
+                    {!ev.security_flag && (
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        fontSize: '11px',
+                        color: 'var(--text-muted)',
+                        marginTop: '2px',
+                        marginBottom: '6px',
+                        paddingLeft: 16
+                      }}>
+                        <FileText size={10} />
+                        <span>
+                          {ev.article_count || 1} article
+                          {(ev.article_count || 1) !== 1 ? 's' : ''} analyzed
+                        </span>
+                      </div>
+                    )}
+ 
                     {/* Line 2: Body text */}
                     <p style={{
                       fontSize: 12,
@@ -201,7 +203,7 @@ export default function EventStream({ data = [], loading }) {
                       WebkitBoxOrient: 'vertical',
                       overflow: 'hidden'
                     }}>
-                      {ev.raw_text_preview || ev.alert_message}
+                      {ev.security_flag ? 'Blocked prompt injection attempt.' : (ev.raw_text_preview || ev.alert_message)}
                     </p>
 
                     {/* Line 3: Category tag */}

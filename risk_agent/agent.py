@@ -409,10 +409,20 @@ async def alert_node(ctx: Context, node_input: dict):
     sentiment = node_input.get("sentiment", "NEUTRAL")
     summary = node_input.get("summary", "")
 
+    if risk_level not in ["HIGH", "MEDIUM"]:
+        # Don't create a manager alert for low risk level suppliers
+        yield Event(
+            content=types.Content(
+                role='model',
+                parts=[types.Part.from_text(text="No action required.")]
+            ),
+            output="No action required."
+        )
+        return
+
     alert_message = ""
-    if risk_level in ["HIGH", "MEDIUM"]:
-        client = genai.Client()
-        prompt = f"""You are a supply chain risk analyst writing urgent alerts for procurement managers. Write exactly 2 short sentences.
+    client = genai.Client()
+    prompt = f"""You are a supply chain risk analyst writing urgent alerts for procurement managers. Write exactly 2 short sentences.
 Be direct and specific — no filler words, no long explanations.
 Sentence 1: State exactly what happened and where in under 20 words.
 Sentence 2: State exactly what action to take in under 15 words.
@@ -421,19 +431,18 @@ Risk: {risk_level} (score {risk_score}/100).
 Events: {event_types}. Summary: {summary}.
 Return only the 2 sentences. No labels, no preamble, no extra text."""
 
-        try:
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=ALERT_MODEL_NAME,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.2)
-            )
-            alert_message = response.text.strip()
-        except Exception as e:
-            logger.error(f"Gemini call failed in alert_node: {e}")
-            alert_message = f"Risk alert detected for {supplier_name} ({risk_level} risk). Immediate review is recommended. Context: {summary}"
-    else:
-        alert_message = "No action required."
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=ALERT_MODEL_NAME,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2)
+        )
+        alert_message = response.text.strip()
+    except Exception as e:
+        logger.error(f"Gemini call failed in alert_node: {e}")
+        alert_message = f"Risk alert detected for {supplier_name} ({risk_level} risk). Immediate review is recommended. Context: {summary}"
+
 
     timestamp = datetime.datetime.utcnow()
     
