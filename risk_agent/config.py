@@ -8,8 +8,7 @@ load_dotenv()
 # Google Cloud Platform configuration
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("PROJECT_ID", "ringed-tuner-499715-h9")
 
-# BigQuery Table Definitions
-BIGQUERY_DATASET_NAME = os.getenv("BIGQUERY_DATASET_NAME", "supply_chain")
+BIGQUERY_DATASET_NAME = os.getenv("BIGQUERY_DATASET") or os.getenv("BIGQUERY_DATASET_NAME", "supply_chain")
 
 # Model configuration
 ANALYZE_MODEL_NAME = os.getenv("ANALYZE_MODEL_NAME", "gemini-3.1-flash-lite")
