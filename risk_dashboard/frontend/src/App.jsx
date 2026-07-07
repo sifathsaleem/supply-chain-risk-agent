@@ -77,7 +77,6 @@ export default function App() {
             <div style={{width:1,height:12,background:'#2d2c2c'}} />
             <span style={{fontSize:10,color:'#a1a1a1'}}>Global Sync: 100%</span>
           </div>
-          <span style={{fontSize:10,fontWeight:500,color:'#a1a1a1',letterSpacing:'0.07em',textTransform:'uppercase'}}>v4.2.0-STABLE</span>
         </footer>
       </div>
     </ToastProvider>
