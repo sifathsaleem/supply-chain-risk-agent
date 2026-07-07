@@ -342,7 +342,7 @@ def get_alerts():
         SELECT a.supplier_name, a.risk_level, a.alert_message, a.timestamp
         FROM {tbl('manager_alerts')} a
         INNER JOIN {tbl('suppliers')} s ON a.supplier_name = s.supplier_name
-        WHERE a.timestamp > DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 24 HOUR)
+        WHERE CAST(a.timestamp AS DATETIME) > DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 24 HOUR)
         ORDER BY a.timestamp DESC
         LIMIT 10
     """
