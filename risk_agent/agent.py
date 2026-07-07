@@ -455,7 +455,7 @@ Return only the 2 sentences. No labels, no preamble, no extra text."""
         SELECT timestamp 
         FROM `{table_ref}`
         WHERE supplier_name = @supplier_name
-        AND timestamp > DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 24 HOUR)
+        AND CAST(timestamp AS DATETIME) > DATETIME_SUB(CURRENT_DATETIME(), INTERVAL 24 HOUR)
         ORDER BY timestamp DESC
         LIMIT 1
     """
