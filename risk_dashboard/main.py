@@ -375,6 +375,21 @@ def get_events():
 
 @app.post("/api/simulate")
 def simulate_event():
+    # Ensure simulated supplier is added to the suppliers table so it passes the INNER JOIN filter
+    try:
+        client = bq_client()
+        check_sql = f"SELECT supplier_name FROM {tbl('suppliers')} WHERE supplier_name = 'Delta Semiconductors'"
+        results = list(client.query(check_sql).result())
+        if not results:
+            insert_sql = f"""
+                INSERT INTO {tbl('suppliers')} (supplier_name, country, category)
+                VALUES ('Delta Semiconductors', 'Taiwan', 'Electronics')
+            """
+            client.query(insert_sql).result()
+            logger.info("Added Delta Semiconductors to suppliers table for simulation.")
+    except Exception as se:
+        logger.error(f"Error ensuring simulation supplier exists: {se}")
+
     payload = {
         "supplier_name": "Delta Semiconductors",
         "country": "Taiwan",
